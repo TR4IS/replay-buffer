@@ -1,0 +1,12 @@
+<!doctype html><html><body style="margin:0;background:#000;height:100vh" id=b><script>
+// Flashes white and beeps at the same instant every 2 s, for A/V sync checks.
+let ac;
+function flash(){
+  const b=document.getElementById('b');
+  const o=ac.createOscillator(), g=ac.createGain();
+  o.frequency.value=1000; o.connect(g); g.connect(ac.destination);
+  g.gain.value=0.5; o.start(); o.stop(ac.currentTime+0.1);
+  b.style.background='#fff'; setTimeout(()=>b.style.background='#000',100);
+}
+window.startSync=()=>{ac=new AudioContext(); flash(); setInterval(flash,2000); return ac.state;};
+</script></body></html>

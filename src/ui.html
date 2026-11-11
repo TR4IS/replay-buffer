@@ -1,0 +1,511 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Replay Buffer</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@100..125,400..800&family=JetBrains+Mono:wght@400;600&display=swap">
+<style>
+/* Layout: one calm column like a hardware deck. Gauge + Save on top, live readouts, then settings. */
+:root {
+  --bg: #f4f6f9;
+  --surface: #ffffff;
+  --ink: #12161c;
+  --muted: #5d6673;
+  --line: #dde2ea;
+  --track: #e7ebf1;
+  --tally: #d93a3f;        /* the recording light */
+  --tally-ink: #ffffff;
+  --signal: #1f9d6b;       /* audio meters, "ok" */
+  --warn: #b7791f;
+  --focus: #3a6fd9;
+  --font-display: "Archivo", system-ui, "Segoe UI", sans-serif;
+  --font-body: "Archivo", system-ui, "Segoe UI", sans-serif;
+  --font-data: "JetBrains Mono", Consolas, "Cascadia Mono", monospace;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0e1116; --surface: #161a21; --ink: #e8ecf2; --muted: #8b95a3; --line: #262c36;
+    --track: #20262f; --tally: #f0484d; --tally-ink: #ffffff; --signal: #35c48d; --warn: #e0a645; --focus: #6d9bff;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0e1116; --surface: #161a21; --ink: #e8ecf2; --muted: #8b95a3; --line: #262c36;
+  --track: #20262f; --tally: #f0484d; --tally-ink: #ffffff; --signal: #35c48d; --warn: #e0a645; --focus: #6d9bff;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body {
+  background: var(--bg); color: var(--ink);
+  font: 400 15px/1.5 var(--font-body);
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: 28px 120px;
+}
+.wrap { max-width: 760px; margin: 0 auto; display: grid; gap: 28px; }
+h1, h2 { font-family: var(--font-display); margin: 0; text-wrap: balance; }
+h2 { font-size: 12px; font-weight: 700; letter-spacing: .09em; text-transform: uppercase; color: var(--muted); font-stretch: 112%; }
+.num { font-family: var(--font-data); font-variant-numeric: tabular-nums; }
+button, input, select { font: inherit; color: inherit; }
+:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+
+/* Header */
+header { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.brand { font-size: 20px; font-weight: 800; font-stretch: 118%; letter-spacing: -.01em; }
+.pill { display: inline-flex; align-items: center; gap: 8px; padding: 5px 12px; border-radius: 999px; font-size: 13px; font-weight: 600; border: 1px solid var(--line); background: var(--surface); }
+.dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); }
+.pill.rec .dot { background: var(--tally); box-shadow: 0 0 0 0 var(--tally); animation: pulse 2s infinite; }
+.pill.err { color: var(--tally); border-color: var(--tally); }
+@keyframes pulse { 0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--tally) 55%, transparent); } 70% { box-shadow: 0 0 0 8px transparent; } 100% { box-shadow: 0 0 0 0 transparent; } }
+@media (prefers-reduced-motion: reduce) { .pill.rec .dot { animation: none; } }
+
+/* Deck: gauge + save */
+.deck { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 24px; display: grid; gap: 18px; }
+.deck-top { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+.held { font-family: var(--font-data); font-variant-numeric: tabular-nums; font-size: clamp(40px, 9vw, 64px); font-weight: 600; line-height: 1; letter-spacing: -.03em; }
+.held small { font-size: .38em; color: var(--muted); font-weight: 400; letter-spacing: 0; margin-left: 6px; }
+.held-label { font-size: 13px; color: var(--muted); margin-top: 6px; }
+.tape { position: relative; height: 14px; border-radius: 7px; background: var(--track); overflow: hidden; }
+.tape > i { position: absolute; inset: 0 auto 0 0; width: 0; background: var(--ink); border-radius: 7px; transition: width .9s linear; }
+.tape .ticks { position: absolute; inset: 0; background-image: repeating-linear-gradient(90deg, transparent 0 calc(10% - 1px), color-mix(in srgb, var(--bg) 70%, transparent) calc(10% - 1px) 10%); pointer-events: none; }
+.save { display: flex; align-items: center; gap: 12px; }
+.btn-save { border: 0; border-radius: 12px; padding: 14px 22px; background: var(--tally); color: var(--tally-ink); font-weight: 700; font-size: 16px; cursor: pointer; display: inline-flex; align-items: center; gap: 10px; }
+.btn-save:hover { filter: brightness(1.06); }
+.btn-save:disabled { opacity: .6; cursor: progress; }
+kbd { font-family: var(--font-data); font-size: 12px; padding: 2px 7px; border-radius: 6px; border: 1px solid color-mix(in srgb, currentColor 35%, transparent); }
+.toast { font-size: 13px; color: var(--muted); }
+.toast:empty { display: none; }
+.toast.ok { color: var(--signal); }
+.toast.bad { color: var(--tally); }
+
+/* Readouts */
+.readouts { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+.ro { background: var(--surface); padding: 12px 14px; min-width: 0; }
+.ro b { display: block; font-family: var(--font-data); font-variant-numeric: tabular-nums; font-size: 20px; font-weight: 600; }
+.ro span { font-size: 12px; color: var(--muted); }
+@media (max-width: 560px) { .readouts { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+
+/* Audio */
+.section { display: grid; gap: 12px; }
+.meters { display: grid; gap: 10px; }
+.meter { display: grid; grid-template-columns: 110px minmax(0, 1fr); gap: 4px 14px; align-items: center; }
+.meter .who { font-weight: 600; font-size: 14px; }
+.meter .dev { grid-column: 2; font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bar { height: 8px; border-radius: 4px; background: var(--track); overflow: hidden; }
+.bar > i { display: block; height: 100%; width: 0; background: var(--signal); transition: width .25s; }
+.bar.off > i { background: var(--muted); }
+.syncline { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; font-size: 14px; padding: 12px 14px; border: 1px dashed var(--line); border-radius: 10px; }
+.syncline p { margin: 0; color: var(--muted); max-width: 52ch; }
+.syncline strong { color: var(--ink); }
+
+/* Clips */
+.clips { list-style: none; margin: 0; padding: 0; border: 1px solid var(--line); border-radius: 12px; overflow: hidden; background: var(--surface); }
+.clips li { display: flex; align-items: center; gap: 12px; padding: 10px 14px; border-top: 1px solid var(--line); }
+.clips li:first-child { border-top: 0; }
+.clips .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; }
+.clips .meta { font-size: 12px; color: var(--muted); white-space: nowrap; }
+.clips .empty { color: var(--muted); font-size: 14px; }
+.link { background: none; border: 0; color: var(--focus); cursor: pointer; padding: 4px 2px; font-weight: 600; font-size: 13px; }
+.row-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+
+/* Settings */
+.card { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; }
+.field { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px 18px; align-items: center; padding: 14px 16px; border-top: 1px solid var(--line); }
+.field:first-child { border-top: 0; }
+.field label, .field .label { font-weight: 600; font-size: 14px; }
+.field .hint { grid-column: 1 / -1; font-size: 12.5px; color: var(--muted); margin-top: -2px; }
+.field.wide { grid-template-columns: minmax(0, 1fr); }
+@media (max-width: 560px) { .field { grid-template-columns: minmax(0, 1fr); } }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 9px; overflow: hidden; flex-wrap: wrap; }
+.seg button { border: 0; background: transparent; padding: 7px 12px; cursor: pointer; font-size: 13px; font-weight: 600; color: var(--muted); }
+.seg button + button { border-left: 1px solid var(--line); }
+.seg button[aria-pressed="true"] { background: var(--ink); color: var(--bg); }
+.seg button:disabled { opacity: .4; cursor: not-allowed; }
+.slider { display: flex; align-items: center; gap: 12px; }
+.slider input { width: min(240px, 50vw); accent-color: var(--ink); }
+.slider output { font-family: var(--font-data); font-variant-numeric: tabular-nums; min-width: 6ch; text-align: right; font-size: 14px; }
+.switch { position: relative; width: 42px; height: 24px; flex: none; }
+.switch input { position: absolute; inset: 0; opacity: 0; margin: 0; cursor: pointer; }
+.switch span { position: absolute; inset: 0; border-radius: 12px; background: var(--track); border: 1px solid var(--line); transition: background .15s; pointer-events: none; }
+.switch span::after { content: ""; position: absolute; top: 2px; left: 2px; width: 18px; height: 18px; border-radius: 50%; background: var(--surface); box-shadow: 0 1px 2px rgb(0 0 0 / .25); transition: transform .15s; }
+.switch input:checked + span { background: var(--ink); }
+.switch input:checked + span::after { transform: translateX(18px); }
+.switch input:disabled + span { opacity: .35; }
+.switch input:disabled { cursor: not-allowed; }
+.switch input:focus-visible + span { outline: 2px solid var(--focus); outline-offset: 2px; }
+.text { width: 100%; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); font-family: var(--font-data); font-size: 13px; }
+.hotkey { width: 180px; text-align: center; cursor: pointer; }
+.hotkey.listening { border-color: var(--focus); }
+select.text { width: auto; font-family: var(--font-body); }
+details.card > summary { cursor: pointer; padding: 14px 16px; font-weight: 600; font-size: 14px; list-style: none; display: flex; justify-content: space-between; }
+details.card > summary::after { content: "Show"; color: var(--focus); font-size: 13px; }
+details.card[open] > summary::after { content: "Hide"; }
+details.card[open] > summary { border-bottom: 1px solid var(--line); }
+
+/* Apply bar */
+.applybar { position: fixed; left: 0; right: 0; bottom: 0; padding: 12px max(16px, env(safe-area-inset-left, 0px)) calc(12px + env(safe-area-inset-bottom, 0px)) max(16px, env(safe-area-inset-right, 0px)); background: var(--surface); border-top: 1px solid var(--line); }
+.applybar .in { max-width: 760px; margin: 0 auto; display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.applybar p { margin: 0; font-size: 13.5px; color: var(--muted); }
+.btn { border: 1px solid var(--line); background: var(--surface); padding: 9px 16px; border-radius: 10px; font-weight: 600; cursor: pointer; }
+.btn.primary { background: var(--ink); color: var(--bg); border-color: var(--ink); }
+.foot { font-size: 12px; color: var(--muted); text-align: center; }
+.offline { color: var(--tally); font-weight: 600; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="brand">Replay Buffer</div>
+    <div id="status" class="pill"><span class="dot"></span><span id="status-text">Connecting…</span></div>
+  </header>
+
+  <section class="deck" aria-label="Buffer">
+    <div class="deck-top">
+      <div>
+        <div class="held"><span id="held">0:00</span><small>of <span id="target">–</span></small></div>
+        <div class="held-label" id="held-label">in the buffer</div>
+      </div>
+      <div class="save">
+        <button class="btn-save" id="save" type="button">Save replay <kbd id="save-key">Alt+F10</kbd></button>
+      </div>
+    </div>
+    <div class="tape" aria-hidden="true"><i id="tape"></i><div class="ticks"></div></div>
+    <div class="toast" id="toast" role="status"></div>
+  </section>
+
+  <div class="readouts" aria-label="Live readouts">
+    <div class="ro"><b id="ro-fps">–</b><span>recording fps</span></div>
+    <div class="ro"><b id="ro-upd">–</b><span>screen updates / s</span></div>
+    <div class="ro"><b id="ro-rate">–</b><span>Mbps right now</span></div>
+    <div class="ro"><b id="ro-size">–</b><span id="ro-size-label">buffer in RAM</span></div>
+  </div>
+
+  <section class="section" aria-labelledby="h-audio">
+    <h2 id="h-audio">Sound</h2>
+    <div class="meters" id="meters"></div>
+    <div class="syncline">
+      <p>Desktop sound reaches the recorder <strong id="delay">–</strong> late, and saved clips correct for it. Run the test again if you change speakers or Voicemeeter settings.</p>
+      <button class="btn" id="synctest" type="button">Run sync test</button>
+    </div>
+    <div class="toast" id="sync-msg" role="status"></div>
+  </section>
+
+  <section class="section" aria-labelledby="h-clips">
+    <div class="row-head"><h2 id="h-clips">Recent replays</h2><button class="link" type="button" id="open-folder">Open folder</button></div>
+    <ul class="clips" id="clips"><li class="empty">No replays yet. Press Save replay or your hotkey.</li></ul>
+  </section>
+
+  <section class="section" aria-labelledby="h-settings">
+    <h2 id="h-settings">Settings</h2>
+
+    <div class="card">
+      <div class="field">
+        <label for="minutes">Replay length</label>
+        <div class="slider"><input type="range" id="minutes" min="1" max="20" step="1"><output id="minutes-out"></output></div>
+        <div class="hint" id="minutes-hint"></div>
+      </div>
+      <div class="field">
+        <span class="label" id="l-mode">Keep the buffer in</span>
+        <div class="seg" role="group" aria-labelledby="l-mode" data-key="buffer_mode">
+          <button type="button" data-v="ram">RAM</button><button type="button" data-v="disk">SSD</button>
+        </div>
+        <div class="hint">RAM is fastest and never wears your SSD. Pick SSD for long buffers if you're short on memory.</div>
+      </div>
+      <div class="field">
+        <label for="hotkey">Save hotkey</label>
+        <input class="text hotkey" id="hotkey" readonly>
+        <div class="hint" id="hotkey-hint">Click the box, then press the new key combination.</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="field">
+        <span class="label" id="l-fps">Frame rate</span>
+        <div class="seg" role="group" aria-labelledby="l-fps" data-key="fps" data-num="1">
+          <button type="button" data-v="30">30</button><button type="button" data-v="60">60</button><button type="button" data-v="120">120</button><button type="button" data-v="144">144</button>
+        </div>
+        <div class="hint">Frames per second in the saved clip. A still screen costs almost nothing at any rate.</div>
+      </div>
+      <div class="field">
+        <span class="label" id="l-codec">Format</span>
+        <div class="seg" role="group" aria-labelledby="l-codec" data-key="codec">
+          <button type="button" data-v="h264">H.264</button><button type="button" data-v="hevc">HEVC</button><button type="button" data-v="av1">AV1</button>
+        </div>
+        <div class="hint" id="codec-hint"></div>
+      </div>
+      <div class="field">
+        <label for="quality">Quality</label>
+        <div class="slider"><input type="range" id="quality" min="14" max="26" step="1"><output id="quality-out"></output></div>
+        <div class="hint">Lower number = sharper picture and bigger files. 18 already looks like the original.</div>
+      </div>
+      <div class="field">
+        <label for="ten_bit">10-bit colour</label>
+        <label class="switch"><input type="checkbox" id="ten_bit"><span></span></label>
+        <div class="hint">Smoother skies and fog, no banding. HEVC and AV1 only.</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="field">
+        <label for="desktop_audio">Desktop sound</label>
+        <label class="switch"><input type="checkbox" id="desktop_audio"><span></span></label>
+      </div>
+      <div class="field">
+        <label for="microphone">Microphone</label>
+        <label class="switch"><input type="checkbox" id="microphone"><span></span></label>
+        <div class="hint">Clips get one mixed track that plays everywhere, plus separate desktop and mic tracks for editing.</div>
+      </div>
+      <div class="field">
+        <label for="capture_cursor">Show mouse cursor</label>
+        <label class="switch"><input type="checkbox" id="capture_cursor"><span></span></label>
+      </div>
+    </div>
+
+    <details class="card">
+      <summary>Advanced</summary>
+      <div class="field wide">
+        <label for="save_dir">Save replays to</label>
+        <input class="text" id="save_dir" spellcheck="false">
+      </div>
+      <div class="field wide">
+        <label for="disk_buffer_dir">SSD buffer folder</label>
+        <input class="text" id="disk_buffer_dir" spellcheck="false">
+      </div>
+      <div class="field">
+        <label for="monitor">Screen</label>
+        <select class="text" id="monitor"></select>
+      </div>
+      <div class="field">
+        <label for="preset">Encoder effort</label>
+        <div class="slider"><input type="range" id="preset" min="1" max="7" step="1"><output id="preset-out"></output></div>
+        <div class="hint">Runs on the graphics card's separate video chip, not the cores your game uses. P4 is the sweet spot; P5+ adds little.</div>
+      </div>
+      <div class="field">
+        <label for="max_bitrate_mbps">Bitrate cap</label>
+        <div class="slider"><input type="range" id="max_bitrate_mbps" min="20" max="200" step="10"><output id="max_bitrate_mbps-out"></output></div>
+        <div class="hint">Limits file size in very fast scenes.</div>
+      </div>
+      <div class="field">
+        <label for="spatial_aq">Adaptive quantization</label>
+        <label class="switch"><input type="checkbox" id="spatial_aq"><span></span></label>
+        <div class="hint">Slightly better dark areas, but uses about 2% of the cores your game uses. Off keeps games fastest.</div>
+      </div>
+      <div class="field">
+        <label for="gpu_priority">Recorder GPU priority</label>
+        <div class="slider"><input type="range" id="gpu_priority" min="-7" max="7" step="1"><output id="gpu_priority-out"></output></div>
+        <div class="hint">0 lets the game go first. Raise it only if clips stutter while the game runs smoothly.</div>
+      </div>
+    </details>
+  </section>
+
+  <div class="foot">Settings page for the Replay Buffer running on this PC. <span id="offline"></span></div>
+</div>
+
+<div class="applybar" id="applybar" hidden>
+  <div class="in">
+    <p>Applying restarts the recorder, so the current buffer starts over.</p>
+    <div style="display:flex;gap:8px">
+      <button class="btn" type="button" id="discard">Discard</button>
+      <button class="btn primary" type="button" id="apply">Apply changes</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const TOKEN = "__TOKEN__";
+const $ = (id) => document.getElementById(id);
+let state = null, draft = null, dirty = false, prev = null, listening = false;
+
+async function api(path, body) {
+  const r = await fetch(path, {
+    method: body === undefined ? "GET" : "POST",
+    headers: { "X-Token": TOKEN, "Content-Type": "application/json" },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  if (!r.ok) throw new Error(r.status);
+  return r.json();
+}
+
+const fmtLen = (s) => { s = Math.max(0, Math.round(s)); return Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0"); };
+const fmtBytes = (b) => b >= 1e9 ? (b / 1e9).toFixed(2) + " GB" : b >= 1e6 ? Math.round(b / 1e6) + " MB" : Math.round(b / 1e3) + " KB";
+const ago = (t) => { const d = Date.now() / 1000 - t; if (d < 60) return "just now"; if (d < 3600) return Math.floor(d / 60) + " min ago"; if (d < 86400) return Math.floor(d / 3600) + " h ago"; return new Date(t * 1000).toLocaleDateString(); };
+const codecHints = {
+  h264: "Plays everywhere: Windows Media Player, Discord, WhatsApp, phones. Recommended.",
+  hevc: "About 30% smaller files. Your Windows can't play it without VLC; Discord can.",
+  av1: "Smallest files. Needs VLC or a browser to play; WhatsApp won't take it.",
+};
+
+function setStatus(cls, text) { const s = $("status"); s.className = "pill " + cls; $("status-text").textContent = text; }
+
+function render() {
+  const s = state;
+  // status
+  if (s.error) setStatus("err", "Problem: " + s.error.slice(0, 70));
+  else if (s.recording) setStatus("rec", `Recording ${s.width}×${s.height}`);
+  else setStatus("", "Starting…");
+
+  $("held").textContent = fmtLen(s.held);
+  $("target").textContent = fmtLen(s.target);
+  $("tape").style.width = Math.min(100, (s.held / s.target) * 100) + "%";
+  $("held-label").textContent = s.held >= s.target - 3 ? "in the buffer, full and rolling" : "in the buffer, filling up";
+  $("save-key").textContent = s.config.hotkey;
+  $("save").disabled = s.saving;
+  if (s.saving) toast("Saving…", "");
+
+  // rates from deltas
+  if (prev) {
+    const dt = (s.now - prev.now) / 1000;
+    if (dt > 0.2) {
+      $("ro-fps").textContent = Math.round((s.frames - prev.frames) / dt);
+      $("ro-upd").textContent = Math.round((s.updates - prev.updates) / dt);
+      $("ro-rate").textContent = ((s.encoded_bytes - prev.encoded_bytes) * 8 / dt / 1e6).toFixed(1);
+    }
+  }
+  $("ro-size").textContent = fmtBytes(s.bytes);
+  $("ro-size-label").textContent = s.config.buffer_mode === "disk" ? "buffer on SSD" : "buffer in RAM";
+
+  // audio
+  const m = $("meters");
+  m.innerHTML = "";
+  if (!s.audio.length) m.innerHTML = '<div class="toast">Sound recording is off.</div>';
+  for (const a of s.audio) {
+    const db = a.peak > 0 ? 20 * Math.log10(a.peak) : -90;
+    const pct = Math.max(0, Math.min(100, (db + 60) / 60 * 100));
+    const row = document.createElement("div");
+    row.className = "meter";
+    row.innerHTML = `<span class="who"></span><div class="bar ${a.active ? "" : "off"}"><i style="width:${pct}%"></i></div><span class="dev"></span>`;
+    row.querySelector(".who").textContent = a.source === "desktop" ? "Desktop" : "Microphone";
+    row.querySelector(".dev").textContent = a.active ? a.device : "Not available — check the device";
+    m.appendChild(row);
+  }
+  $("delay").textContent = s.desktop_delay + " ms";
+  const sy = s.sync;
+  $("synctest").disabled = sy.state === "running";
+  $("synctest").textContent = sy.state === "running" ? "Testing… (watch for flashes)" : "Run sync test";
+  const sm = $("sync-msg");
+  if (sy.state === "done") { sm.textContent = `Done. Desktop sound delay set to ${sy.ms} ms.`; sm.className = "toast ok"; }
+  else if (sy.state === "failed") { sm.textContent = sy.error; sm.className = "toast bad"; }
+  else if (sy.state === "running") { sm.textContent = "A white square flashes and beeps 7 times. Keep sound on."; sm.className = "toast"; }
+  else sm.textContent = "";
+
+  // clips
+  const ul = $("clips");
+  ul.innerHTML = "";
+  if (!s.clips.length) ul.innerHTML = '<li class="empty">No replays yet. Press Save replay or your hotkey.</li>';
+  for (const c of s.clips) {
+    const li = document.createElement("li");
+    li.innerHTML = `<span class="name"></span><span class="meta"></span><button class="link" type="button">Play</button>`;
+    li.querySelector(".name").textContent = c.name.replace(/\.mp4$/i, "");
+    li.querySelector(".meta").textContent = fmtBytes(c.size) + " · " + ago(c.time);
+    li.querySelector("button").onclick = () => api("/api/open", { what: "clip", name: c.name }).then(r => !r.ok && toast(r.error, "bad"));
+    ul.appendChild(li);
+  }
+
+  // last save
+  if (s.last_save && (!lastSaveSeen || lastSaveSeen !== s.last_save.at)) {
+    lastSaveSeen = s.last_save.at;
+    if (prev) toast(s.last_save.ok ? `${s.last_save.text} · ${s.last_save.name}` : s.last_save.text, s.last_save.ok ? "ok" : "bad");
+  }
+  if (!s.hotkey_ok) { $("hotkey-hint").textContent = `${s.config.hotkey} is taken by another app. Pick another combination.`; $("hotkey-hint").style.color = "var(--tally)"; }
+
+  if (!dirty) { draft = structuredClone(s.config); fillForm(); }
+  prev = s;
+}
+let lastSaveSeen = null;
+
+function toast(text, kind) { const t = $("toast"); t.textContent = text; t.className = "toast " + (kind || ""); }
+
+// ---- settings form ----
+const sliders = {
+  minutes: { key: "replay_minutes", out: (v) => v + " min" },
+  quality: { key: "quality", out: (v) => "CQ " + v },
+  preset: { key: "preset", out: (v) => "P" + v },
+  max_bitrate_mbps: { key: "max_bitrate_mbps", out: (v) => v + " Mbps" },
+  gpu_priority: { key: "gpu_priority", out: (v) => (v > 0 ? "+" : "") + v },
+};
+const toggles = ["ten_bit", "desktop_audio", "microphone", "capture_cursor", "spatial_aq"];
+const texts = ["save_dir", "disk_buffer_dir"];
+
+function fillForm() {
+  const c = draft;
+  for (const [id, d] of Object.entries(sliders)) { $(id).value = c[d.key]; $(id + "-out").textContent = d.out(c[d.key]); }
+  for (const id of toggles) $(id).checked = !!c[id];
+  for (const id of texts) if (document.activeElement !== $(id)) $(id).value = c[id];
+  if (!listening) $("hotkey").value = c.hotkey;
+  document.querySelectorAll(".seg").forEach((g) => {
+    const v = String(c[g.dataset.key]);
+    g.querySelectorAll("button").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.v === v)));
+  });
+  $("ten_bit").disabled = c.codec === "h264";
+  $("codec-hint").textContent = codecHints[c.codec];
+  const sel = $("monitor");
+  const opts = [{ n: 0, label: "Main screen" }].concat((state.monitors || []).map((m) => ({ n: m.n, label: `Screen ${m.n} · ${m.w}×${m.h}${m.primary ? " (main)" : ""}` })));
+  if (sel.options.length !== opts.length) { sel.innerHTML = ""; for (const o of opts) sel.add(new Option(o.label, o.n)); }
+  sel.value = c.monitor;
+  // size estimate
+  const mbps = state && prev ? Math.max(8, ((state.encoded_bytes) * 8) / 1e6 / Math.max(1, state.frames / c.fps)) : 30;
+  const est = mbps * 1e6 / 8 * c.replay_minutes * 60;
+  $("minutes-hint").textContent = `At the current bitrate that's about ${fmtBytes(est)} of ${c.buffer_mode === "disk" ? "SSD space" : "RAM"}. Busy, fast games use more.`;
+}
+
+function change(key, value) { draft[key] = value; setDirty(); fillForm(); }
+function setDirty() { dirty = JSON.stringify(draft) !== JSON.stringify(state.config); $("applybar").hidden = !dirty; }
+
+for (const [id, d] of Object.entries(sliders)) $(id).addEventListener("input", (e) => change(d.key, +e.target.value));
+for (const id of toggles) $(id).addEventListener("change", (e) => change(id, e.target.checked));
+for (const id of texts) $(id).addEventListener("input", (e) => { draft[id] = e.target.value; setDirty(); });
+$("monitor").addEventListener("change", (e) => change("monitor", +e.target.value));
+document.querySelectorAll(".seg").forEach((g) => g.addEventListener("click", (e) => {
+  const b = e.target.closest("button"); if (!b || b.disabled) return;
+  change(g.dataset.key, g.dataset.num ? +b.dataset.v : b.dataset.v);
+}));
+
+// hotkey capture
+const keyName = (e) => {
+  if (/^F\d{1,2}$/.test(e.key)) return e.key;
+  if (/^[a-z0-9]$/i.test(e.key)) return e.key.toUpperCase();
+  return { Home: "Home", End: "End", Insert: "Insert", Pause: "Pause", PrintScreen: "PrintScreen" }[e.key] || null;
+};
+$("hotkey").addEventListener("click", () => { listening = true; $("hotkey").classList.add("listening"); $("hotkey").value = "Press keys…"; });
+$("hotkey").addEventListener("blur", () => { listening = false; $("hotkey").classList.remove("listening"); $("hotkey").value = draft.hotkey; });
+$("hotkey").addEventListener("keydown", (e) => {
+  if (!listening) return;
+  e.preventDefault();
+  if (e.key === "Escape") { $("hotkey").blur(); return; }
+  const k = keyName(e); if (!k) return;
+  const mods = [e.ctrlKey && "Ctrl", e.altKey && "Alt", e.shiftKey && "Shift"].filter(Boolean);
+  if (!mods.length && !/^F\d/.test(k) && !["Pause", "PrintScreen", "Insert", "Home", "End"].includes(k)) { $("hotkey").value = "Add Ctrl, Alt or Shift"; return; }
+  listening = false; $("hotkey").classList.remove("listening");
+  change("hotkey", [...mods, k].join("+")); $("hotkey").blur();
+});
+
+$("apply").onclick = async () => {
+  draft.desktop_delay_ms = state.desktop_delay;
+  $("apply").disabled = true;
+  try {
+    const r = await api("/api/config", draft);
+    if (r.ok) { dirty = false; $("applybar").hidden = true; toast("Settings applied. The buffer is starting over.", "ok"); }
+    else toast(r.error, "bad");
+  } catch { toast("Couldn't reach the recorder. Is it still running?", "bad"); }
+  $("apply").disabled = false;
+};
+$("discard").onclick = () => { dirty = false; $("applybar").hidden = true; draft = structuredClone(state.config); fillForm(); };
+$("save").onclick = () => { toast("Saving…", ""); api("/api/save", {}).catch(() => toast("Couldn't reach the recorder.", "bad")); };
+$("synctest").onclick = () => api("/api/synctest", {});
+$("open-folder").onclick = () => api("/api/open", { what: "folder" });
+
+async function poll() {
+  try { state = await api("/api/state"); $("offline").textContent = ""; render(); }
+  catch { setStatus("err", "Recorder not running"); $("offline").innerHTML = '<span class="offline">Start replay-buffer.exe, then reload this page.</span>'; }
+  setTimeout(poll, 1000);
+}
+poll();
+</script>
+</body>
+</html>

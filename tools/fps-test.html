@@ -1,0 +1,4 @@
+<!doctype html><html><body style="margin:0;background:#111"><canvas id=c></canvas><div id=f style="position:fixed;top:8px;left:8px;color:#fff;font:20px monospace"></div><script>
+const c=document.getElementById('c'),x=c.getContext('2d');c.width=innerWidth;c.height=innerHeight;let n=0,t0=performance.now();
+function d(t){n++;x.fillStyle='#111';x.fillRect(0,0,c.width,c.height);x.fillStyle='hsl('+(t/5%360)+',80%,60%)';x.fillRect((t/2)%c.width,100,120,120);if(t-t0>1000){document.getElementById('f').textContent=n+' fps';n=0;t0=t}requestAnimationFrame(d)}requestAnimationFrame(d);
+</script></body></html>
